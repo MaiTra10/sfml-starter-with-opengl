@@ -3,9 +3,54 @@
 #include <thread>
 #include <atomic>
 #include <iostream>
-#include "triangle.h"
+#include <cmath>
+#include <algorithm>
+#include "glyph.h"
 
-std::unique_ptr<Triangle> triangle;
+// Text outline and its width, built once on the main thread before rendering starts
+sf::VertexArray textOutline;
+float textWidth = 0.f;
+
+// Held keys are shared with the rendering thread so it can move smoothly every frame
+std::atomic<bool> scrollLeftHeld(false);
+std::atomic<bool> scrollRightHeld(false);
+std::atomic<bool> zoomInHeld(false);
+std::atomic<bool> zoomOutHeld(false);
+
+// Fraction of the 2 unit wide viewport the text fills at startup, leaving a small margin
+const float viewportFillSize = 1.9f;
+
+// Scroll speed in viewport units per second, and how much zoom multiplies by per second
+const float scrollSpeed = 1.f;
+const float zoomRatePerSecond = 2.f;
+
+// Key presses and releases share this so both events update the same held key flags
+void setHeldKey(sf::Keyboard::Key key, bool isHeld) {
+
+    if (key == sf::Keyboard::Key::Left) {
+
+        scrollLeftHeld = isHeld;
+
+    }
+
+    if (key == sf::Keyboard::Key::Right) {
+
+        scrollRightHeld = isHeld;
+
+    }
+
+    if (key == sf::Keyboard::Key::Up) {
+
+        zoomInHeld = isHeld;
+
+    }
+
+    if (key == sf::Keyboard::Key::Down) {
+
+        zoomOutHeld = isHeld;
+
+    }
+}
 
 void renderingThread(sf::RenderWindow& window, std::atomic<bool>& running, std::atomic<bool>& contextReady)
 {
@@ -42,22 +87,53 @@ void renderingThread(sf::RenderWindow& window, std::atomic<bool>& running, std::
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-	sf::CircleShape circ;
-	circ.setRadius(0.4f);
-	circ.setPointCount(100);
-	circ.setPosition(sf::Vector2f(-0.4f, -0.4f));
-	circ.setFillColor(sf::Color(150, 50, 250));
-	circ.setOutlineThickness(0.01f);
-	circ.setOutlineColor(sf::Color(250, 150, 100));
-    
+    // Apply scaling to keep the whole string visible in the viewport
+    float textHeight = glyphTop - glyphBottom;
+    float zoomScale = viewportFillSize / std::max(textWidth, textHeight);
+
+    // The text point shown at the screen centre, starting in the middle so the string is centred
+    float viewCenterX = textWidth / 2.f;
+    float viewCenterY = (glyphTop + glyphBottom) / 2.f;
+
+    // Frame rate is unlimited, so movement is based on elapsed time to keep speed consistent
+    sf::Clock frameClock;
+
     while(running) {
-        // draw...
-		
+
+        float elapsedSeconds = frameClock.restart().asSeconds();
+
+        // Dividing by zoom keeps the on-screen scroll speed the same at any zoom level
+        if (scrollLeftHeld) {
+
+            viewCenterX -= scrollSpeed * elapsedSeconds / zoomScale;
+
+        }
+
+        if (scrollRightHeld) {
+
+            viewCenterX += scrollSpeed * elapsedSeconds / zoomScale;
+
+        }
+
+        // Multiplying makes zoom feel even, changing by the same ratio each second at any size
+        if (zoomInHeld) {
+
+            zoomScale *= std::pow(zoomRatePerSecond, elapsedSeconds);
+            
+        }
+        if (zoomOutHeld) {
+
+            zoomScale /= std::pow(zoomRatePerSecond, elapsedSeconds);
+
+        }
+
+        // Shift the viewed point to the origin first, then scale, so zooming stays centred on screen
+        sf::Transform textTransform;
+        textTransform.scale({zoomScale, zoomScale});
+        textTransform.translate({-viewCenterX, -viewCenterY});
+
         glClear(GL_COLOR_BUFFER_BIT);
-		window.draw(*triangle);
-		window.pushGLStates(); // Save OpenGL states before drawing SFML shapes
-		window.draw(circ);
-		window.popGLStates(); // Restore OpenGL states after drawing SFML shapes
+		window.draw(textOutline, textTransform);
 		window.display();
     }
 
@@ -65,7 +141,15 @@ void renderingThread(sf::RenderWindow& window, std::atomic<bool>& running, std::
 }
 
 
-int main() {
+int main(int argc, char* argv[]) {
+
+    // Render the command-line string, or the test sentence when none is given
+    std::string text = "The quick brown fox jumps over the lazy dog";
+    if (argc > 1) {
+
+        text = argv[1];
+
+    }
 
 	sf::ContextSettings settings;
     settings.majorVersion = 2;
@@ -73,11 +157,11 @@ int main() {
     settings.attributeFlags = sf::ContextSettings::Default;
 	
 	sf::RenderWindow window(
-    	sf::VideoMode({800, 800}), 
-    	"SFML + GLAD (OpenGL 2.1)",
+        sf::VideoMode({800, 800}), 
+        "SFML + GLAD (OpenGL 2.1)",
         sf::Style::Default, 
-    	sf::State::Windowed,  
-    	settings
+        sf::State::Windowed,  
+        settings
 	);
 
 
@@ -93,19 +177,15 @@ int main() {
         return -1;
     }
 
-	// assets
-	triangle = std::make_unique<Triangle>(
-		std::vector<sf::Vector2f>{
-			sf::Vector2f(0.8, 0), 
-			sf::Vector2f(-0.4, 0.693), 
-			sf::Vector2f(-0.4, -0.693)});
+	textOutline = buildTextOutline(text, FONT_DIRECTORY);
+	textWidth = text.size() * characterAdvance;
 
 	std::atomic<bool> running(true);
     std::atomic<bool> contextReady(false);
 
     // Launch the rendering thread
     std::thread thread(renderingThread, std::ref(window), std::ref(running), std::ref(contextReady));
- 
+
     // CRUCIAL: Pause the main thread until the rendering thread has successfully claimed the context.
     // This prevents pollEvent() from clashing with setActive(true) during initialization.
     while (!contextReady) {
@@ -124,21 +204,20 @@ int main() {
                     thread.join();
                 }
 
-                // Do additional cleanup here before closing the window
-                triangle.reset(); // Release the Triangle object	
                 window.close();
 			}
 
+            // Arrow keys scroll left and right and zoom in and out while held down
             if (const auto* keyPressed = event->getIf<sf::Event::KeyPressed>()) {
-                
-                // Key press events are used to trigger actions, not to hold them down.
+
+                setHeldKey(keyPressed->code, true);
 
             }
 
             if (const auto* keyReleased = event->getIf<sf::Event::KeyReleased>()) {
-                
-				// key release events are used to trigger actions, not to hold them down.
 
+                setHeldKey(keyReleased->code, false);
+                
 			}
 	
 		}

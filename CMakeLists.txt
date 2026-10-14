@@ -21,9 +21,9 @@ FetchContent_MakeAvailable(SFML)
 find_package(OpenGL REQUIRED)
 
 add_executable(main 
-  src/main.cpp
-  src/triangle.cpp
-  src/opengl_loader.cpp
+    src/main.cpp
+    src/glyph.cpp
+    src/opengl_loader.cpp
 )
 
 # Tell compiler where to find gl.h
@@ -41,3 +41,6 @@ target_link_libraries(main
 )
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT main)
+
+# Give the program the absolute font path
+target_compile_definitions(main PRIVATE FONT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/fonts/cmuntt/")
